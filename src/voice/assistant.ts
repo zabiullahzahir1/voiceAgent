@@ -71,10 +71,17 @@ export function buildAssistantConfig() {
       keyterm: ['insurance', 'ZIP code', 'date of birth', 'apartment', 'suite', 'member ID'],
     },
 
-    /** Vapi's bundled voices avoid a second vendor account for the demo. */
+    /**
+     * Vapi's bundled voices avoid needing a second vendor account (ElevenLabs,
+     * PlayHT) for the demo.
+     *
+     * Overridable via VAPI_VOICE_ID: Vapi retires voices from time to time and
+     * refuses to create assistants using a legacy one, which should not require
+     * a code change to work around.
+     */
     voice: {
       provider: 'vapi',
-      voiceId: 'Paige',
+      voiceId: process.env.VAPI_VOICE_ID || 'Elliot',
     },
 
     /**
