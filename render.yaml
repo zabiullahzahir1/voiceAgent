@@ -1,0 +1,56 @@
+# Render blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploy with: Render dashboard -> New -> Blueprint -> point at this repo.
+#
+# IMPORTANT — plan choice
+# ----------------------
+# Persistent disks are not available on Render's free plan; a free instance has
+# an ephemeral filesystem and spins down when idle, which would lose registered
+# patients between calls. Because "data must survive restarts" is a hard
+# requirement here, this blueprint uses the `starter` plan with a 1 GB disk.
+#
+# To run on the free plan instead, delete the `disk:` block and swap SQLite for
+# a hosted database — see "Deployment trade-offs" in the README.
+services:
+  - type: web
+    name: voice-patient-registration
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /health
+
+    disk:
+      name: patient-data
+      mountPath: /data
+      sizeGB: 1
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: LOG_LEVEL
+        value: info
+
+      # Must match the mounted disk above so the database survives redeploys.
+      - key: DATABASE_PATH
+        value: /data/patients.sqlite
+
+      - key: SEED_ON_BOOT
+        value: "true"
+
+      # Render substitutes the service's own public URL. Vapi calls back here.
+      - key: PUBLIC_BASE_URL
+        fromService:
+          type: web
+          name: voice-patient-registration
+          envVarKey: RENDER_EXTERNAL_URL
+
+      # Secrets — set these in the Render dashboard, never in this file.
+      - key: VAPI_SERVER_SECRET
+        sync: false
+      - key: VAPI_API_KEY
+        sync: false
+      - key: API_TOKEN
+        sync: false

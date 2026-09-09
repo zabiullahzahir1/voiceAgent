@@ -1,0 +1,23 @@
+node_modules/
+dist/
+*.log
+logs/
+
+# Local secrets — never commit. See .env.example for the required keys.
+.env
+.env.*
+!.env.example
+
+# SQLite database files (created at runtime / mounted from a Render disk)
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+.DS_Store
+Thumbs.db
+
+# The assessment brief is marked "CONFIDENTIAL — FOR CANDIDATE USE ONLY";
+# keep it out of the published repository.
+*.pdf

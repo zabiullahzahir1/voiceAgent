@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Patient Registrations — Intake Dashboard</title>
+    <!--
+      Bonus: a read-only dashboard over the same REST API the voice agent writes
+      through. Deliberately dependency-free — no build step, no CDN — so it
+      cannot break the deployment and works offline.
+    -->
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f7f9;
+        --surface: #ffffff;
+        --border: #e2e5ea;
+        --text: #16181d;
+        --muted: #6b7280;
+        --accent: #2563eb;
+        --ok: #059669;
+        --warn: #b45309;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1115;
+          --surface: #171a21;
+          --border: #262b35;
+          --text: #e8eaed;
+          --muted: #9aa2af;
+          --accent: #60a5fa;
+          --ok: #34d399;
+          --warn: #fbbf24;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 64px; }
+      header { display: flex; flex-wrap: wrap; gap: 16px; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+      h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+      .sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+      .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
+      .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; min-width: 130px; }
+      .stat b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+      .stat span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+      input, button {
+        font: inherit; padding: 8px 12px; border-radius: 8px;
+        border: 1px solid var(--border); background: var(--surface); color: var(--text);
+      }
+      input { min-width: 190px; }
+      button { cursor: pointer; }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 28px; }
+      .card h2 { font-size: 14px; margin: 0; padding: 14px 16px; border-bottom: 1px solid var(--border); font-weight: 600; }
+      .scroll { overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+      th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); vertical-align: top; white-space: nowrap; }
+      th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; }
+      tbody tr:last-child td { border-bottom: none; }
+      td.wrap-cell { white-space: normal; min-width: 200px; }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; border: 1px solid var(--border); }
+      .pill.deleted { color: var(--warn); border-color: currentColor; }
+      .pill.active { color: var(--ok); border-color: currentColor; }
+      .empty { padding: 28px 16px; color: var(--muted); text-align: center; }
+      .err { padding: 14px 16px; color: #dc2626; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>Patient Registrations</h1>
+        <p class="sub" id="updated"></p>
+      </header>
+      <p class="sub">
+        Live view of records created by the voice intake agent. Reads the same
+        <code>GET /patients</code> endpoint the reviewers use.
+      </p>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="controls">
+        <input id="q-last-name" placeholder="Last name" />
+        <input id="q-phone" placeholder="Phone (10 digits)" />
+        <input id="q-dob" placeholder="DOB (MM/DD/YYYY)" />
+        <button class="primary" id="search">Search</button>
+        <button id="reset">Reset</button>
+        <button id="refresh">Refresh</button>
+      </div>
+
+      <div class="card">
+        <h2>Patients</h2>
+        <div class="scroll"><table id="patients-table">
+          <thead>
+            <tr>
+              <th>Name</th><th>DOB</th><th>Sex</th><th>Phone</th>
+              <th>Address</th><th>Insurance</th><th>Language</th>
+              <th>Status</th><th>Registered</th>
+            </tr>
+          </thead>
+          <tbody id="patients-body"></tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <h2>Recent Calls</h2>
+        <div class="scroll"><table>
+          <thead>
+            <tr><th>Started</th><th>Outcome</th><th>Duration</th><th>Summary</th></tr>
+          </thead>
+          <tbody id="calls-body"></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const esc = (v) =>
+        v === null || v === undefined || v === ''
+          ? '<span style="color:var(--muted)">—</span>'
+          : String(v).replace(/[&<>"']/g, (c) =>
+              ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+            );
+
+      const fmtDate = (iso) => {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+      };
+
+      // Stored DOB is YYYY-MM-DD; render it the U.S. way without timezone drift.
+      const fmtDob = (v) => {
+        if (!v) return '';
+        const [y, m, d] = v.split('-');
+        return y && m && d ? `${m}/${d}/${y}` : v;
+      };
+
+      async function getJson(url) {
+        const res = await fetch(url);
+        const body = await res.json();
+        if (body.error) throw new Error(body.error.message || 'Request failed');
+        return body.data;
+      }
+
+      function renderStats(data) {
+        const active = data.patients.filter((p) => !p.deleted_at).length;
+        const withInsurance = data.patients.filter((p) => p.insurance_provider).length;
+        $('stats').innerHTML = [
+          ['Total matching', data.total],
+          ['Active', active],
+          ['With insurance', withInsurance],
+        ]
+          .map(([label, value]) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`)
+          .join('');
+      }
+
+      function renderPatients(data) {
+        const body = $('patients-body');
+        if (data.patients.length === 0) {
+          body.innerHTML = '<tr><td colspan="9" class="empty">No patients match that search.</td></tr>';
+          return;
+        }
+        body.innerHTML = data.patients
+          .map((p) => {
+            const address = [p.address_line_1, p.address_line_2, `${p.city}, ${p.state} ${p.zip_code}`]
+              .filter(Boolean)
+              .join(', ');
+            const insurance = p.insurance_provider
+              ? `${p.insurance_provider}${p.insurance_member_id ? ` (${p.insurance_member_id})` : ''}`
+              : '';
+            const status = p.deleted_at
+              ? '<span class="pill deleted">deleted</span>'
+              : '<span class="pill active">active</span>';
+            return `<tr>
+              <td><strong>${esc(`${p.first_name} ${p.last_name}`)}</strong><br><code>${esc(p.patient_id)}</code></td>
+              <td>${esc(fmtDob(p.date_of_birth))}</td>
+              <td>${esc(p.sex)}</td>
+              <td>${esc(p.phone_number_formatted)}</td>
+              <td class="wrap-cell">${esc(address)}</td>
+              <td class="wrap-cell">${esc(insurance)}</td>
+              <td>${esc(p.preferred_language)}</td>
+              <td>${status}</td>
+              <td>${esc(fmtDate(p.created_at))}</td>
+            </tr>`;
+          })
+          .join('');
+      }
+
+      function renderCalls(calls) {
+        const body = $('calls-body');
+        if (!calls || calls.length === 0) {
+          body.innerHTML = '<tr><td colspan="4" class="empty">No calls recorded yet.</td></tr>';
+          return;
+        }
+        body.innerHTML = calls
+          .map(
+            (c) => `<tr>
+              <td>${esc(fmtDate(c.started_at || c.created_at))}</td>
+              <td>${esc(c.outcome)}</td>
+              <td>${c.duration_secs ? esc(Math.round(c.duration_secs) + 's') : esc(null)}</td>
+              <td class="wrap-cell">${esc(c.summary)}</td>
+            </tr>`,
+          )
+          .join('');
+      }
+
+      function buildQuery() {
+        const params = new URLSearchParams();
+        const lastName = $('q-last-name').value.trim();
+        const phone = $('q-phone').value.replace(/\D/g, '');
+        const dob = $('q-dob').value.trim();
+        if (lastName) params.set('last_name', lastName);
+        if (phone) params.set('phone_number', phone);
+        if (dob) params.set('date_of_birth', dob);
+        params.set('limit', '200');
+        return params.toString();
+      }
+
+      async function load() {
+        try {
+          const [patients, calls] = await Promise.all([
+            getJson(`/patients?${buildQuery()}`),
+            getJson('/calls?limit=15').catch(() => ({ calls: [] })),
+          ]);
+          renderStats(patients);
+          renderPatients(patients);
+          renderCalls(calls.calls);
+          $('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        } catch (error) {
+          $('patients-body').innerHTML = `<tr><td colspan="9" class="err">${esc(error.message)}</td></tr>`;
+        }
+      }
+
+      $('search').addEventListener('click', load);
+      $('refresh').addEventListener('click', load);
+      $('reset').addEventListener('click', () => {
+        ['q-last-name', 'q-phone', 'q-dob'].forEach((id) => ($(id).value = ''));
+        load();
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') load();
+      });
+
+      load();
+      setInterval(load, 15000); // keep the demo live during a review call
+    </script>
+  </body>
+</html>
