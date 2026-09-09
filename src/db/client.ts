@@ -38,6 +38,28 @@ pg.types.setTypeParser(OID.TIMESTAMP, (value: string) => new Date(`${value}Z`).t
 
 let pool: Pool | null = null;
 
+/**
+ * Remove `sslmode` (and the related `uselibpqcompat`) from the connection
+ * string.
+ *
+ * Managed providers hand out URLs ending in `?sslmode=require`, but TLS is
+ * configured explicitly via the `ssl` option below. Leaving both in place means
+ * two sources of truth, and `pg-connection-string` emits a deprecation warning
+ * about `require` changing meaning in pg v9. Stripping it makes the `ssl`
+ * option unambiguously authoritative and keeps the logs clean.
+ */
+function stripSslMode(connectionString: string): string {
+  try {
+    const url = new URL(connectionString);
+    url.searchParams.delete('sslmode');
+    url.searchParams.delete('uselibpqcompat');
+    return url.toString();
+  } catch {
+    // Not a parseable URL (e.g. a libpq key=value string) — leave it untouched.
+    return connectionString;
+  }
+}
+
 export function getPool(): Pool {
   if (pool) return pool;
 
@@ -48,7 +70,7 @@ export function getPool(): Pool {
   }
 
   pool = new pg.Pool({
-    connectionString: env.databaseUrl,
+    connectionString: stripSslMode(env.databaseUrl),
     /**
      * Managed providers (Neon, Supabase, Render) require TLS but present
      * certificates that Node's default CA bundle does not chain to. Local
