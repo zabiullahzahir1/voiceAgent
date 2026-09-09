@@ -1,17 +1,35 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
 
-  "functions": {
-    "api/index.ts": {
-      "memory": 1024,
-      "maxDuration": 30
-    }
-  },
+  "//": [
+    "An explicit `builds` entry rather than zero-config detection.",
+    "",
+    "Zero-config treated files under src/ as additional serverless entrypoints,",
+    "which fails because they export named helpers (buildApp) rather than a",
+    "default handler — Vercel reported:",
+    "  Invalid export found in module \"/var/task/src/app.js\".",
+    "",
+    "Declaring the build explicitly means exactly one function is created from",
+    "api/index.ts; everything under src/ is bundled as a plain dependency of it.",
+    "`includeFiles` ships public/ into the lambda so @fastify/static can serve",
+    "the dashboard, and `routes` sends every path to that single function."
+  ],
 
-  "rewrites": [
+  "builds": [
     {
-      "source": "/(.*)",
-      "destination": "/api"
+      "src": "api/index.ts",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": "public/**",
+        "maxDuration": 30
+      }
+    }
+  ],
+
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.ts"
     }
   ]
 }

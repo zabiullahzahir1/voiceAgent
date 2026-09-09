@@ -46,12 +46,29 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(registerVapiRoutes);
 
   // --- Dashboard (bonus) ---------------------------------------------------
-  const publicDir = path.join(process.cwd(), 'public');
-  if (fs.existsSync(publicDir)) {
+  /**
+   * Locate `public/`, which sits in a different place depending on how the app
+   * is running: from source, from `dist/`, or bundled into a serverless lambda
+   * where the working directory is the task root. Probing a few candidates is
+   * simpler than threading the path through configuration, and the API still
+   * works if none of them match.
+   */
+  const publicDir = [
+    path.join(process.cwd(), 'public'),
+    path.resolve(__dirname, '..', 'public'),
+    path.resolve(__dirname, '..', '..', 'public'),
+  ].find((candidate) => fs.existsSync(path.join(candidate, 'index.html')));
+
+  if (publicDir) {
     await app.register(fastifyStatic, { root: publicDir, prefix: '/' });
   } else {
+    // No dashboard bundled — keep the root path informative rather than 404.
+    app.log.warn('public/ not found; serving a JSON root instead of the dashboard');
     app.get('/', async (_request, reply) =>
-      reply.status(200).send({ data: { service: 'voice-patient-registration' }, error: null }),
+      reply.status(200).send({
+        data: { service: 'voice-patient-registration', dashboard: 'unavailable', health: '/health' },
+        error: null,
+      }),
     );
   }
 
