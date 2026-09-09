@@ -255,8 +255,26 @@ at build time.
 
 `api/index.ts` is the entry point: it builds the same Fastify app that
 `src/index.ts` runs locally and hands it each request, so there is no separate
-serverless codebase to maintain. `vercel.json` rewrites every path to that
-function, except static assets which Vercel serves from `public/` directly.
+serverless codebase to maintain.
+
+**Why `vercel.json` looks the way it does** (JSON allows no comments, and Vercel
+rejects unknown keys — including a `"//"` comment property):
+
+- **`builds` instead of zero-config.** Zero-config detection treated files under
+  `src/` as additional serverless entrypoints. They export named helpers such as
+  `buildApp` rather than a default handler, so those lambdas died on load with
+  `Invalid export found in module "/var/task/src/app.js"`. Declaring the build
+  pins exactly one function; everything under `src/` is bundled as an ordinary
+  dependency of it.
+- **`public/**` built as static.** The dashboard is served by Vercel's CDN, not
+  through the function — faster, and it avoids `@fastify/static` having to
+  resolve a directory inside the lambda bundle. Route order matters: the
+  explicit static paths are matched before the catch-all into Fastify.
+- **`api/tsconfig.json`.** The root config sets `rootDir: "src"` so
+  `npm run build` emits a flat `dist/`. That makes `api/index.ts` — outside
+  `src/`, importing from it — an error under that config. Vercel resolves the
+  tsconfig nearest the entrypoint, so the `api/` one widens `rootDir` without
+  affecting the local build.
 
 <details>
 <summary>Alternative: Render / any Docker host</summary>

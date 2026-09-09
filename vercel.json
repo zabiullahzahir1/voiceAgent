@@ -1,24 +1,5 @@
 {
   "version": 2,
-
-  "//": [
-    "Explicit builds rather than zero-config detection.",
-    "",
-    "Zero-config treated files under src/ as additional serverless entrypoints,",
-    "which fails because they export named helpers (buildApp) rather than a",
-    "default handler:  Invalid export found in module '/var/task/src/app.js'.",
-    "Declaring the build pins exactly one function; everything under src/ is",
-    "bundled as an ordinary dependency of it.",
-    "",
-    "public/ is served by Vercel's CDN as static assets rather than through the",
-    "function. That is faster (no lambda invocation for the dashboard), and it",
-    "avoids @fastify/static having to resolve a directory inside the bundle.",
-    "The API and the Vapi webhook are the only things that need the function.",
-    "",
-    "Route order matters: the explicit static paths are matched before the",
-    "catch-all that forwards everything else to Fastify."
-  ],
-
   "builds": [
     { "src": "public/**", "use": "@vercel/static" },
     {
@@ -27,7 +8,6 @@
       "config": { "maxDuration": 30 }
     }
   ],
-
   "routes": [
     { "src": "/", "dest": "/public/index.html" },
     { "src": "/index.html", "dest": "/public/index.html" },
