@@ -4,6 +4,7 @@ import { env } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { UnauthorizedError } from '../../lib/errors';
 import { saveCallLog } from '../../domain/call-log.repository';
+import { buildAssistantConfig } from '../assistant';
 import { executeTool } from '../tools';
 
 /**
@@ -233,9 +234,12 @@ export async function registerVapiRoutes(app: FastifyInstance): Promise<void> {
    * Convenience endpoint: returns the exact assistant configuration this
    * deployment expects, so it can be inspected in a browser or piped straight
    * into Vapi. Also what `npm run provision:vapi` sends.
+   *
+   * Imported statically at the top of this file rather than lazily here — a
+   * dynamic `import()` is not resolved by the serverless bundler and made this
+   * route throw at runtime in production.
    */
   app.get('/voice/assistant-config', async (_request, reply) => {
-    const { buildAssistantConfig } = await import('../assistant');
     return reply.status(200).send(buildAssistantConfig());
   });
 }
