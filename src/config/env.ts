@@ -39,15 +39,26 @@ export const env = {
   /**
    * Public URL Vapi calls back into.
    *
-   * Falls back to `RENDER_EXTERNAL_URL`, which Render injects automatically —
-   * so a manually created Render service works without anyone having to paste
-   * the service's own URL back into its own environment. Explicit
-   * `PUBLIC_BASE_URL` still wins, which is what local tunnels need.
+   * Derived from whatever the host injects, so no deployment needs its own URL
+   * pasted back into its own environment:
+   *   - Vercel: VERCEL_PROJECT_PRODUCTION_URL (stable) then VERCEL_URL
+   *     (per-deployment). Both omit the scheme, so https:// is prefixed.
+   *   - Render: RENDER_EXTERNAL_URL (already absolute).
+   * An explicit PUBLIC_BASE_URL always wins — which is what a local ngrok or
+   * cloudflared tunnel needs.
    */
-  publicBaseUrl: str(
-    'PUBLIC_BASE_URL',
-    str('RENDER_EXTERNAL_URL', `http://localhost:${int('PORT', 3000)}`),
-  ).replace(/\/+$/, ''),
+  publicBaseUrl: (() => {
+    const explicit = str('PUBLIC_BASE_URL');
+    if (explicit) return explicit.replace(/\/+$/, '');
+
+    const vercelHost = str('VERCEL_PROJECT_PRODUCTION_URL', str('VERCEL_URL'));
+    if (vercelHost) return `https://${vercelHost.replace(/\/+$/, '')}`;
+
+    const render = str('RENDER_EXTERNAL_URL');
+    if (render) return render.replace(/\/+$/, '');
+
+    return `http://localhost:${int('PORT', 3000)}`;
+  })(),
 
   /** Postgres connection string, e.g. postgresql://user:pass@host/db. */
   databaseUrl: str('DATABASE_URL'),
