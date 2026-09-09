@@ -1,0 +1,15 @@
+{
+  // The root tsconfig sets `rootDir: "src"` so that `npm run build` emits a
+  // flat dist/. That makes this file — which lives outside src/ and imports
+  // from it — an error under that config ("is not under rootDir").
+  //
+  // Vercel's Node builder resolves the tsconfig nearest the entrypoint, so this
+  // one applies to the serverless build and widens rootDir to the repo root.
+  // Local builds and typechecking are unaffected.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "../dist-api"
+  },
+  "include": ["./**/*.ts", "../src/**/*.ts"]
+}
