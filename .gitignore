@@ -8,12 +8,9 @@ logs/
 .env.*
 !.env.example
 
-# SQLite database files (created at runtime / mounted from a Render disk)
+# Local database dumps / scratch data
 data/
-*.sqlite
-*.sqlite-journal
-*.sqlite-wal
-*.sqlite-shm
+*.sql.gz
 
 .DS_Store
 Thumbs.db

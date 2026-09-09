@@ -8,7 +8,7 @@ import {
   updatePatientSchema,
 } from './patient.schema';
 import * as repo from './patient.repository';
-import type { Patient } from './patient.repository';
+import { UNIQUE_VIOLATION, type Patient } from './patient.repository';
 
 /**
  * Business logic for patients.
@@ -24,11 +24,20 @@ import type { Patient } from './patient.repository';
 
 export type { Patient };
 
-export function createPatient(rawInput: unknown): Patient {
+/** Narrow a thrown value to a Postgres driver error with a SQLSTATE code. */
+function pgErrorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code: unknown }).code)
+    : undefined;
+}
+
+export async function createPatient(rawInput: unknown): Promise<Patient> {
   const parsed = createPatientSchema.safeParse(rawInput);
   if (!parsed.success) throw new ValidationError(toFieldIssues(parsed.error));
 
-  const existing = repo.findActivePatientByPhone(parsed.data.phone_number);
+  // Pre-check so the common case produces a helpful message naming the existing
+  // patient. The unique index below is still the authority.
+  const existing = await repo.findActivePatientByPhone(parsed.data.phone_number);
   if (existing) {
     throw new ConflictError(
       `A patient record already exists for ${existing.first_name} ${existing.last_name} with this phone number.`,
@@ -36,7 +45,25 @@ export function createPatient(rawInput: unknown): Patient {
     );
   }
 
-  const patient = repo.insertPatient(parsed.data);
+  let patient: Patient;
+  try {
+    patient = await repo.insertPatient(parsed.data);
+  } catch (error) {
+    /**
+     * Two callers registering the same number simultaneously would both pass
+     * the pre-check. The partial unique index makes one of them fail here, and
+     * we translate that into the same 409 rather than a 500 — the check-then-act
+     * race is closed by the database, not by application locking.
+     */
+    if (pgErrorCode(error) === UNIQUE_VIOLATION) {
+      const winner = await repo.findActivePatientByPhone(parsed.data.phone_number);
+      throw new ConflictError(
+        'A patient record already exists with this phone number.',
+        winner?.patient_id,
+      );
+    }
+    throw error;
+  }
 
   // Observability requirement: the final collected payload for every
   // registration lands in stdout as structured JSON.
@@ -48,30 +75,30 @@ export function createPatient(rawInput: unknown): Patient {
   return patient;
 }
 
-export function getPatient(patientId: string, includeDeleted = false): Patient {
-  const patient = repo.findPatientById(patientId, includeDeleted);
+export async function getPatient(patientId: string, includeDeleted = false): Promise<Patient> {
+  const patient = await repo.findPatientById(patientId, includeDeleted);
   if (!patient) throw new NotFoundError(`No patient found with id ${patientId}.`);
   return patient;
 }
 
-export function listPatients(rawQuery: unknown): { rows: Patient[]; total: number } {
+export async function listPatients(rawQuery: unknown): Promise<{ rows: Patient[]; total: number }> {
   const parsed = listPatientsQuerySchema.safeParse(rawQuery ?? {});
   if (!parsed.success) throw new ValidationError(toFieldIssues(parsed.error));
   return repo.listPatients(parsed.data);
 }
 
-export function updatePatient(patientId: string, rawInput: unknown): Patient {
+export async function updatePatient(patientId: string, rawInput: unknown): Promise<Patient> {
   const parsed = updatePatientSchema.safeParse(rawInput);
   if (!parsed.success) throw new ValidationError(toFieldIssues(parsed.error));
 
   // Confirm the target exists before we attempt the write, so a missing record
   // is a clean 404 rather than a silent no-op.
-  const current = getPatient(patientId);
+  const current = await getPatient(patientId);
 
   // Moving a patient onto a phone number another active patient already owns
   // would violate the partial unique index; surface it as a 409, not a 500.
   if (parsed.data.phone_number && parsed.data.phone_number !== current.phone_number) {
-    const clash = repo.findActivePatientByPhone(parsed.data.phone_number);
+    const clash = await repo.findActivePatientByPhone(parsed.data.phone_number);
     if (clash && clash.patient_id !== patientId) {
       throw new ConflictError(
         'Another patient record already uses that phone number.',
@@ -80,7 +107,16 @@ export function updatePatient(patientId: string, rawInput: unknown): Patient {
     }
   }
 
-  const updated = repo.updatePatient(patientId, parsed.data);
+  let updated: Patient | null;
+  try {
+    updated = await repo.updatePatient(patientId, parsed.data);
+  } catch (error) {
+    if (pgErrorCode(error) === UNIQUE_VIOLATION) {
+      throw new ConflictError('Another patient record already uses that phone number.');
+    }
+    throw error;
+  }
+
   if (!updated) throw new NotFoundError(`No patient found with id ${patientId}.`);
 
   logger.info(
@@ -98,8 +134,8 @@ export function updatePatient(patientId: string, rawInput: unknown): Patient {
 }
 
 /** Soft delete. Returns the stamped record; 404 if already gone or unknown. */
-export function deletePatient(patientId: string): Patient {
-  const deleted = repo.softDeletePatient(patientId);
+export async function deletePatient(patientId: string): Promise<Patient> {
+  const deleted = await repo.softDeletePatient(patientId);
   if (!deleted) throw new NotFoundError(`No active patient found with id ${patientId}.`);
 
   logger.info({ event: 'patient.deleted', patient_id: patientId }, 'Patient soft-deleted');
@@ -107,7 +143,7 @@ export function deletePatient(patientId: string): Patient {
 }
 
 /** Returning-caller lookup used by the voice agent's `lookup_patient` tool. */
-export function findActiveByPhone(phoneNumber: string): Patient | null {
+export async function findActiveByPhone(phoneNumber: string): Promise<Patient | null> {
   return repo.findActivePatientByPhone(phoneNumber);
 }
 

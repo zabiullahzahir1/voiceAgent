@@ -1,4 +1,4 @@
-import { getDb } from '../db/client';
+import { query } from '../db/client';
 
 /**
  * Bonus: per-call transcript + summary storage.
@@ -24,28 +24,40 @@ export type CallLog = {
 
 export type CallLogInput = Omit<CallLog, 'created_at'>;
 
-/** Upsert — a call may be reported more than once, and reports can arrive late. */
-export function saveCallLog(input: CallLogInput): void {
-  getDb()
-    .prepare(
-      `INSERT INTO call_logs (
-         call_id, patient_id, caller_number, outcome, summary, transcript,
-         duration_secs, started_at, ended_at, created_at
-       ) VALUES (
-         @call_id, @patient_id, @caller_number, @outcome, @summary, @transcript,
-         @duration_secs, @started_at, @ended_at, @created_at
-       )
-       ON CONFLICT (call_id) DO UPDATE SET
-         patient_id    = COALESCE(excluded.patient_id, call_logs.patient_id),
-         caller_number = COALESCE(excluded.caller_number, call_logs.caller_number),
-         outcome       = COALESCE(excluded.outcome, call_logs.outcome),
-         summary       = COALESCE(excluded.summary, call_logs.summary),
-         transcript    = COALESCE(excluded.transcript, call_logs.transcript),
-         duration_secs = COALESCE(excluded.duration_secs, call_logs.duration_secs),
-         started_at    = COALESCE(excluded.started_at, call_logs.started_at),
-         ended_at      = COALESCE(excluded.ended_at, call_logs.ended_at)`,
-    )
-    .run({ ...input, created_at: new Date().toISOString() });
+/**
+ * Upsert — a call may be reported more than once, and reports can arrive late.
+ *
+ * COALESCE on update means a later, sparser report never blanks a field an
+ * earlier one already filled in. In particular the `patient_id` written at
+ * registration time survives the end-of-call report, which does not know it.
+ */
+export async function saveCallLog(input: CallLogInput): Promise<void> {
+  await query(
+    `INSERT INTO call_logs (
+       call_id, patient_id, caller_number, outcome, summary, transcript,
+       duration_secs, started_at, ended_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     ON CONFLICT (call_id) DO UPDATE SET
+       patient_id    = COALESCE(EXCLUDED.patient_id,    call_logs.patient_id),
+       caller_number = COALESCE(EXCLUDED.caller_number, call_logs.caller_number),
+       outcome       = COALESCE(EXCLUDED.outcome,       call_logs.outcome),
+       summary       = COALESCE(EXCLUDED.summary,       call_logs.summary),
+       transcript    = COALESCE(EXCLUDED.transcript,    call_logs.transcript),
+       duration_secs = COALESCE(EXCLUDED.duration_secs, call_logs.duration_secs),
+       started_at    = COALESCE(EXCLUDED.started_at,    call_logs.started_at),
+       ended_at      = COALESCE(EXCLUDED.ended_at,      call_logs.ended_at)`,
+    [
+      input.call_id,
+      input.patient_id,
+      input.caller_number,
+      input.outcome,
+      input.summary,
+      input.transcript,
+      input.duration_secs,
+      input.started_at,
+      input.ended_at,
+    ],
+  );
 }
 
 /**
@@ -54,24 +66,28 @@ export function saveCallLog(input: CallLogInput): void {
  * Called from the tool handler at the moment of registration, because the
  * end-of-call report arrives later and does not know the patient_id.
  */
-export function linkCallToPatient(callId: string, patientId: string, outcome: string): void {
-  getDb()
-    .prepare(
-      `INSERT INTO call_logs (call_id, patient_id, outcome, created_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT (call_id) DO UPDATE SET patient_id = excluded.patient_id, outcome = excluded.outcome`,
-    )
-    .run(callId, patientId, outcome, new Date().toISOString());
+export async function linkCallToPatient(
+  callId: string,
+  patientId: string,
+  outcome: string,
+): Promise<void> {
+  await query(
+    `INSERT INTO call_logs (call_id, patient_id, outcome)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (call_id) DO UPDATE SET
+       patient_id = EXCLUDED.patient_id,
+       outcome    = EXCLUDED.outcome`,
+    [callId, patientId, outcome],
+  );
 }
 
-export function listCallLogsForPatient(patientId: string): CallLog[] {
-  return getDb()
-    .prepare('SELECT * FROM call_logs WHERE patient_id = ? ORDER BY created_at DESC')
-    .all(patientId) as CallLog[];
+export async function listCallLogsForPatient(patientId: string): Promise<CallLog[]> {
+  return query<CallLog>(
+    'SELECT * FROM call_logs WHERE patient_id = $1 ORDER BY created_at DESC',
+    [patientId],
+  );
 }
 
-export function listRecentCallLogs(limit = 25): CallLog[] {
-  return getDb()
-    .prepare('SELECT * FROM call_logs ORDER BY created_at DESC LIMIT ?')
-    .all(limit) as CallLog[];
+export async function listRecentCallLogs(limit = 25): Promise<CallLog[]> {
+  return query<CallLog>('SELECT * FROM call_logs ORDER BY created_at DESC LIMIT $1', [limit]);
 }

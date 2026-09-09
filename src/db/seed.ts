@@ -1,4 +1,4 @@
-import { getDb } from './client';
+import { closePool, migrate } from './client';
 import { logger } from '../lib/logger';
 import { countPatients } from '../domain/patient.repository';
 import { createPatient } from '../domain/patient.service';
@@ -50,20 +50,18 @@ const SEED_PATIENTS = [
  * Insert the seed rows only when the table is empty.
  *
  * The emptiness check is what makes this safe to run on every boot: a redeploy
- * against a disk that already holds real registrations is a no-op, so seeding
- * can never clobber data collected during a call.
+ * against a database that already holds real registrations is a no-op, so
+ * seeding can never clobber data collected during a call.
  */
-export function seedIfEmpty(): void {
-  getDb();
-
-  if (countPatients() > 0) {
+export async function seedIfEmpty(): Promise<void> {
+  if ((await countPatients()) > 0) {
     logger.debug('Database already contains patients — skipping seed');
     return;
   }
 
   for (const patient of SEED_PATIENTS) {
     try {
-      createPatient(patient);
+      await createPatient(patient);
     } catch (error) {
       logger.error({ err: error, patient: patient.last_name }, 'Failed to insert seed patient');
     }
@@ -74,5 +72,9 @@ export function seedIfEmpty(): void {
 
 // Allow `npm run seed` to run this file directly.
 if (require.main === module) {
-  seedIfEmpty();
+  void (async () => {
+    await migrate();
+    await seedIfEmpty();
+    await closePool();
+  })();
 }

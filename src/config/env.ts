@@ -1,4 +1,3 @@
-import path from 'node:path';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -39,8 +38,25 @@ export const env = {
   logLevel: str('LOG_LEVEL', 'info'),
   publicBaseUrl: str('PUBLIC_BASE_URL', `http://localhost:${int('PORT', 3000)}`).replace(/\/+$/, ''),
 
-  /** Absolute path to the SQLite file. Resolved so relative paths work from any cwd. */
-  databasePath: path.resolve(process.cwd(), str('DATABASE_PATH', './data/patients.sqlite')),
+  /** Postgres connection string, e.g. postgresql://user:pass@host/db. */
+  databaseUrl: str('DATABASE_URL'),
+  /**
+   * TLS for the database connection. Managed providers (Neon, Supabase, Render)
+   * require it; a local Postgres over plain TCP does not. Auto-detected from
+   * the connection string unless `DATABASE_SSL` is set explicitly.
+   */
+  databaseSsl: (() => {
+    const explicit = process.env.DATABASE_SSL;
+    if (explicit !== undefined && explicit !== '') {
+      return ['1', 'true', 'yes', 'on'].includes(explicit.toLowerCase());
+    }
+    const url = str('DATABASE_URL');
+    if (url === '') return false;
+    if (/sslmode=(disable|allow)/.test(url)) return false;
+    // Anything not obviously local is assumed to be a managed, TLS-only host.
+    return !/@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
+  })(),
+
   seedOnBoot: bool('SEED_ON_BOOT', true),
 
   vapi: {
@@ -60,6 +76,9 @@ export const env = {
  * suite never require a Vapi account.
  */
 export function warnAboutMissingConfig(warn: (message: string) => void): void {
+  if (!env.databaseUrl) {
+    warn('DATABASE_URL is not set — the service cannot persist anything.');
+  }
   if (!env.vapi.serverSecret) {
     warn(
       'VAPI_SERVER_SECRET is not set — the /voice/vapi webhook will accept unauthenticated requests. Set it before going live.',

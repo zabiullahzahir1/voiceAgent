@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
-import { getDb } from '../db/client';
+import { query, queryOne } from '../db/client';
 import { NotFoundError } from '../lib/errors';
+import { UNIQUE_VIOLATION } from './patient.repository';
 import { findPatientById } from './patient.repository';
 
 /**
@@ -24,12 +25,15 @@ export type Appointment = {
 
 export type TimePreference = 'morning' | 'afternoon' | 'any';
 
-/** Clinic hours, in whole hours, local to the clinic (treated as UTC here). */
+/** Clinic hours, in whole UTC hours. */
 const MORNING_SLOTS = [9, 10, 11];
 const AFTERNOON_SLOTS = [13, 14, 15, 16];
 
 /** Earliest bookable appointment: two days out, so "tomorrow" is never offered. */
 const LEAD_TIME_DAYS = 2;
+
+/** How far ahead to search before giving up. */
+const SEARCH_HORIZON_DAYS = 60;
 
 function candidateHours(preference: TimePreference): number[] {
   if (preference === 'morning') return MORNING_SLOTS;
@@ -45,62 +49,94 @@ export function parseTimePreference(raw: string | undefined): TimePreference {
   return 'any';
 }
 
-function isTaken(isoSlot: string): boolean {
-  const row = getDb()
-    .prepare("SELECT 1 FROM appointments WHERE scheduled_for = ? AND status = 'scheduled'")
-    .get(isoSlot);
-  return row !== undefined;
-}
-
-/** Walk forward from the lead time until an unbooked weekday slot is found. */
-export function findNextAvailableSlot(preference: TimePreference, from = new Date()): string {
+/** Every weekday slot in the search window, in chronological order. */
+function candidateSlots(preference: TimePreference, from: Date): string[] {
   const hours = candidateHours(preference);
+  const slots: string[] = [];
 
-  for (let dayOffset = LEAD_TIME_DAYS; dayOffset < LEAD_TIME_DAYS + 60; dayOffset += 1) {
+  for (let dayOffset = LEAD_TIME_DAYS; dayOffset < LEAD_TIME_DAYS + SEARCH_HORIZON_DAYS; dayOffset += 1) {
     const day = new Date(
       Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate() + dayOffset),
     );
-    const weekday = day.getUTCDay();
-    if (weekday === 0 || weekday === 6) continue; // clinic is closed at weekends
+    if (day.getUTCDay() === 0 || day.getUTCDay() === 6) continue; // closed at weekends
 
     for (const hour of hours) {
       const slot = new Date(day);
       slot.setUTCHours(hour, 0, 0, 0);
-      const iso = slot.toISOString();
-      if (!isTaken(iso)) return iso;
+      slots.push(slot.toISOString());
     }
   }
 
-  throw new Error('No appointment slots available in the next 60 days.');
+  return slots;
 }
 
-export function scheduleAppointment(args: {
+/**
+ * The first slot in the window that nobody holds.
+ *
+ * One query rather than one per candidate: fetch the booked set, then scan.
+ */
+export async function findNextAvailableSlot(
+  preference: TimePreference,
+  from = new Date(),
+): Promise<string> {
+  const slots = candidateSlots(preference, from);
+  if (slots.length === 0) throw new Error('No candidate appointment slots.');
+
+  const taken = await query<{ scheduled_for: string }>(
+    `SELECT scheduled_for FROM appointments
+      WHERE status = 'scheduled' AND scheduled_for = ANY($1::timestamptz[])`,
+    [slots],
+  );
+
+  const takenSet = new Set(taken.map((row) => row.scheduled_for));
+  const free = slots.find((slot) => !takenSet.has(slot));
+
+  if (!free) throw new Error(`No appointment slots available in the next ${SEARCH_HORIZON_DAYS} days.`);
+  return free;
+}
+
+export async function scheduleAppointment(args: {
   patientId: string;
   timePreference?: string;
   reason?: string;
-}): Appointment {
-  const patient = findPatientById(args.patientId);
+}): Promise<Appointment> {
+  const patient = await findPatientById(args.patientId);
   if (!patient) throw new NotFoundError(`No patient found with id ${args.patientId}.`);
 
-  const scheduledFor = findNextAvailableSlot(parseTimePreference(args.timePreference));
+  const preference = parseTimePreference(args.timePreference);
 
-  const appointment: Appointment = {
-    appointment_id: crypto.randomUUID(),
-    patient_id: args.patientId,
-    scheduled_for: scheduledFor,
-    reason: args.reason?.trim() || 'New patient visit',
-    status: 'scheduled',
-    created_at: new Date().toISOString(),
-  };
+  /**
+   * Two callers can pick the same slot between the availability query and the
+   * insert. The partial unique index rejects the loser, so retry with the next
+   * free slot rather than failing the booking.
+   */
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const scheduledFor = await findNextAvailableSlot(preference);
 
-  getDb()
-    .prepare(
-      `INSERT INTO appointments (appointment_id, patient_id, scheduled_for, reason, status, created_at)
-       VALUES (@appointment_id, @patient_id, @scheduled_for, @reason, @status, @created_at)`,
-    )
-    .run(appointment);
+    try {
+      const row = await queryOne<Appointment>(
+        `INSERT INTO appointments (appointment_id, patient_id, scheduled_for, reason, status)
+         VALUES ($1, $2, $3, $4, 'scheduled')
+         RETURNING *`,
+        [
+          crypto.randomUUID(),
+          args.patientId,
+          scheduledFor,
+          args.reason?.trim() || 'New patient visit',
+        ],
+      );
+      if (row) return row;
+    } catch (error) {
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code: unknown }).code)
+          : undefined;
+      if (code !== UNIQUE_VIOLATION) throw error;
+      // Slot taken in the meantime — loop and pick the next one.
+    }
+  }
 
-  return appointment;
+  throw new Error('Could not reserve an appointment slot after several attempts.');
 }
 
 /** "2026-09-14T14:00:00.000Z" -> "Monday, September 14 at 2 PM" — for speech. */
@@ -119,8 +155,9 @@ export function speakAppointment(isoDateTime: string): string {
   return `${weekdays[date.getUTCDay()]}, ${months[date.getUTCMonth()]} ${date.getUTCDate()} at ${hour12} ${suffix}`;
 }
 
-export function listAppointmentsForPatient(patientId: string): Appointment[] {
-  return getDb()
-    .prepare('SELECT * FROM appointments WHERE patient_id = ? ORDER BY scheduled_for ASC')
-    .all(patientId) as Appointment[];
+export async function listAppointmentsForPatient(patientId: string): Promise<Appointment[]> {
+  return query<Appointment>(
+    'SELECT * FROM appointments WHERE patient_id = $1 ORDER BY scheduled_for ASC',
+    [patientId],
+  );
 }

@@ -2,28 +2,31 @@
 #
 # Deploy with: Render dashboard -> New -> Blueprint -> point at this repo.
 #
-# IMPORTANT — plan choice
-# ----------------------
-# Persistent disks are not available on Render's free plan; a free instance has
-# an ephemeral filesystem and spins down when idle, which would lose registered
-# patients between calls. Because "data must survive restarts" is a hard
-# requirement here, this blueprint uses the `starter` plan with a 1 GB disk.
+# The service is stateless: all patient data lives in Postgres, reached via
+# DATABASE_URL. That means the free plan is sufficient — there is no disk to
+# lose when the instance restarts or spins down, which is what makes the
+# "data survives restarts" requirement hold here.
 #
-# To run on the free plan instead, delete the `disk:` block and swap SQLite for
-# a hosted database — see "Deployment trade-offs" in the README.
+# Database options, in order of preference:
+#   1. Neon (https://neon.tech) — free tier that does not expire. Copy the
+#      pooled connection string into DATABASE_URL in the Render dashboard.
+#   2. Supabase — same idea, also a non-expiring free tier.
+#   3. Render Postgres — convenient, but the free instance is deleted after
+#      30 days. Uncomment the `databases:` block below to use it.
+#
+# NOTE: on Render's free plan the web service sleeps after ~15 minutes of
+# inactivity and takes 30-60s to wake. The first call after a quiet period may
+# time out. Hit /health once before a demo, or use the starter plan to keep it
+# warm. Patient data is unaffected either way.
+
 services:
   - type: web
     name: voice-patient-registration
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    plan: free
     region: oregon
     healthCheckPath: /health
-
-    disk:
-      name: patient-data
-      mountPath: /data
-      sizeGB: 1
 
     envVars:
       - key: NODE_ENV
@@ -32,10 +35,6 @@ services:
         value: 3000
       - key: LOG_LEVEL
         value: info
-
-      # Must match the mounted disk above so the database survives redeploys.
-      - key: DATABASE_PATH
-        value: /data/patients.sqlite
 
       - key: SEED_ON_BOOT
         value: "true"
@@ -48,9 +47,29 @@ services:
           envVarKey: RENDER_EXTERNAL_URL
 
       # Secrets — set these in the Render dashboard, never in this file.
+      #
+      # Paste your Neon/Supabase connection string here. To use Render's own
+      # Postgres instead, delete these two lines and uncomment both the
+      # `fromDatabase` block and the `databases:` section at the bottom.
+      - key: DATABASE_URL
+        sync: false
+      # - key: DATABASE_URL
+      #   fromDatabase:
+      #     name: patients-db
+      #     property: connectionString
+
       - key: VAPI_SERVER_SECRET
         sync: false
       - key: VAPI_API_KEY
         sync: false
       - key: API_TOKEN
         sync: false
+
+# Uncomment to provision Render's own Postgres instead of Neon.
+# Note: free Render databases are deleted 30 days after creation.
+#
+# databases:
+#   - name: patients-db
+#     plan: free
+#     region: oregon
+#     postgresMajorVersion: "16"

@@ -1,11 +1,14 @@
 import crypto from 'node:crypto';
-import { getDb } from '../db/client';
+import { query, queryOne } from '../db/client';
 import type { CreatePatientInput, ListPatientsQuery, UpdatePatientInput } from './patient.schema';
 
 /**
- * Data access for `patients`. Pure SQL, no validation and no HTTP awareness —
- * callers are expected to hand it values that have already been through
- * `patient.schema.ts`.
+ * Data access for `patients`. Parameterised SQL only — no validation and no
+ * HTTP awareness. Callers are expected to hand it values that have already
+ * been through `patient.schema.ts`.
+ *
+ * Every query uses bound parameters (`$1`, `$2`, …) rather than interpolation,
+ * so user-supplied values can never be parsed as SQL.
  */
 
 export type Patient = {
@@ -51,110 +54,101 @@ const WRITABLE_COLUMNS = [
   'emergency_contact_phone',
 ] as const;
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
+/** Postgres error code for a unique-constraint violation. */
+export const UNIQUE_VIOLATION = '23505';
 
-export function insertPatient(input: CreatePatientInput): Patient {
-  const db = getDb();
-  const timestamp = nowIso();
+export async function insertPatient(input: CreatePatientInput): Promise<Patient> {
   const patientId = crypto.randomUUID();
 
-  const row = {
-    patient_id: patientId,
-    first_name: input.first_name,
-    last_name: input.last_name,
-    date_of_birth: input.date_of_birth,
-    sex: input.sex,
-    phone_number: input.phone_number,
-    email: input.email ?? null,
-    address_line_1: input.address_line_1,
-    address_line_2: input.address_line_2 ?? null,
-    city: input.city,
-    state: input.state,
-    zip_code: input.zip_code,
-    insurance_provider: input.insurance_provider ?? null,
-    insurance_member_id: input.insurance_member_id ?? null,
-    preferred_language: input.preferred_language ?? 'English',
-    emergency_contact_name: input.emergency_contact_name ?? null,
-    emergency_contact_phone: input.emergency_contact_phone ?? null,
-    created_at: timestamp,
-    updated_at: timestamp,
-    deleted_at: null,
-  };
-
-  db.prepare(
+  const rows = await query<Patient>(
     `INSERT INTO patients (
        patient_id, first_name, last_name, date_of_birth, sex, phone_number, email,
        address_line_1, address_line_2, city, state, zip_code,
        insurance_provider, insurance_member_id, preferred_language,
-       emergency_contact_name, emergency_contact_phone,
-       created_at, updated_at, deleted_at
-     ) VALUES (
-       @patient_id, @first_name, @last_name, @date_of_birth, @sex, @phone_number, @email,
-       @address_line_1, @address_line_2, @city, @state, @zip_code,
-       @insurance_provider, @insurance_member_id, @preferred_language,
-       @emergency_contact_name, @emergency_contact_phone,
-       @created_at, @updated_at, @deleted_at
-     )`,
-  ).run(row);
+       emergency_contact_name, emergency_contact_phone
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+     RETURNING *`,
+    [
+      patientId,
+      input.first_name,
+      input.last_name,
+      input.date_of_birth,
+      input.sex,
+      input.phone_number,
+      input.email ?? null,
+      input.address_line_1,
+      input.address_line_2 ?? null,
+      input.city,
+      input.state,
+      input.zip_code,
+      input.insurance_provider ?? null,
+      input.insurance_member_id ?? null,
+      input.preferred_language ?? 'English',
+      input.emergency_contact_name ?? null,
+      input.emergency_contact_phone ?? null,
+    ],
+  );
 
-  return row;
+  // RETURNING guarantees exactly one row on a successful insert.
+  return rows[0]!;
 }
 
-export function findPatientById(patientId: string, includeDeleted = false): Patient | null {
-  const db = getDb();
-  const sql = includeDeleted
-    ? 'SELECT * FROM patients WHERE patient_id = ?'
-    : 'SELECT * FROM patients WHERE patient_id = ? AND deleted_at IS NULL';
-  return (db.prepare(sql).get(patientId) as Patient | undefined) ?? null;
-}
-
-/** Active patient with this exact 10-digit number. Drives duplicate detection. */
-export function findActivePatientByPhone(phoneNumber: string): Patient | null {
-  const db = getDb();
-  return (
-    (db
-      .prepare('SELECT * FROM patients WHERE phone_number = ? AND deleted_at IS NULL')
-      .get(phoneNumber) as Patient | undefined) ?? null
+export async function findPatientById(
+  patientId: string,
+  includeDeleted = false,
+): Promise<Patient | null> {
+  return queryOne<Patient>(
+    `SELECT * FROM patients
+      WHERE patient_id = $1 ${includeDeleted ? '' : 'AND deleted_at IS NULL'}`,
+    [patientId],
   );
 }
 
-export function listPatients(query: ListPatientsQuery): { rows: Patient[]; total: number } {
-  const db = getDb();
+/** Active patient with this exact 10-digit number. Drives duplicate detection. */
+export async function findActivePatientByPhone(phoneNumber: string): Promise<Patient | null> {
+  return queryOne<Patient>(
+    'SELECT * FROM patients WHERE phone_number = $1 AND deleted_at IS NULL',
+    [phoneNumber],
+  );
+}
 
-  const where: string[] = [];
-  const params: Record<string, unknown> = {};
+export async function listPatients(
+  q: ListPatientsQuery,
+): Promise<{ rows: Patient[]; total: number }> {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
 
-  if (!query.include_deleted) where.push('deleted_at IS NULL');
+  if (!q.include_deleted) conditions.push('deleted_at IS NULL');
 
-  if (query.last_name) {
+  if (q.last_name) {
     // Case-insensitive prefix match — matches the lower(last_name) index.
-    where.push('lower(last_name) LIKE @last_name');
-    params.last_name = `${query.last_name.toLowerCase()}%`;
+    params.push(`${q.last_name.toLowerCase()}%`);
+    conditions.push(`lower(last_name) LIKE $${params.length}`);
   }
-  if (query.date_of_birth) {
-    where.push('date_of_birth = @date_of_birth');
-    params.date_of_birth = query.date_of_birth;
+  if (q.date_of_birth) {
+    params.push(q.date_of_birth);
+    conditions.push(`date_of_birth = $${params.length}`);
   }
-  if (query.phone_number) {
-    where.push('phone_number = @phone_number');
-    params.phone_number = query.phone_number;
+  if (q.phone_number) {
+    params.push(q.phone_number);
+    conditions.push(`phone_number = $${params.length}`);
   }
 
-  const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
-  const limit = query.limit ?? 50;
-  const offset = query.offset ?? 0;
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const total = (
-    db.prepare(`SELECT COUNT(*) AS count FROM patients ${whereSql}`).get(params) as { count: number }
-  ).count;
+  const totalRows = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM patients ${where}`,
+    params,
+  );
+  const total = Number(totalRows[0]?.count ?? 0);
 
-  const rows = db
-    .prepare(
-      `SELECT * FROM patients ${whereSql} ORDER BY created_at DESC LIMIT @limit OFFSET @offset`,
-    )
-    .all({ ...params, limit, offset }) as Patient[];
+  params.push(q.limit ?? 50, q.offset ?? 0);
+  const rows = await query<Patient>(
+    `SELECT * FROM patients ${where}
+      ORDER BY created_at DESC
+      LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params,
+  );
 
   return { rows, total };
 }
@@ -163,47 +157,46 @@ export function listPatients(query: ListPatientsQuery): { rows: Patient[]; total
  * Apply a partial update. Only keys present in `input` are touched, so a PUT
  * that omits a field leaves the stored value alone rather than nulling it.
  */
-export function updatePatient(patientId: string, input: UpdatePatientInput): Patient | null {
-  const db = getDb();
-
+export async function updatePatient(
+  patientId: string,
+  input: UpdatePatientInput,
+): Promise<Patient | null> {
   const assignments: string[] = [];
-  const params: Record<string, unknown> = { patient_id: patientId, updated_at: nowIso() };
+  const params: unknown[] = [];
 
   for (const column of WRITABLE_COLUMNS) {
     const value = (input as Record<string, unknown>)[column];
     if (value !== undefined) {
-      assignments.push(`${column} = @${column}`);
-      params[column] = value;
+      params.push(value);
+      assignments.push(`${column} = $${params.length}`);
     }
   }
 
   if (assignments.length === 0) return findPatientById(patientId);
 
-  const result = db
-    .prepare(
-      `UPDATE patients SET ${assignments.join(', ')}, updated_at = @updated_at
-       WHERE patient_id = @patient_id AND deleted_at IS NULL`,
-    )
-    .run(params);
+  params.push(patientId);
 
-  return result.changes > 0 ? findPatientById(patientId) : null;
+  return queryOne<Patient>(
+    `UPDATE patients
+        SET ${assignments.join(', ')}, updated_at = now()
+      WHERE patient_id = $${params.length} AND deleted_at IS NULL
+      RETURNING *`,
+    params,
+  );
 }
 
 /** Soft delete — the row stays, `deleted_at` is stamped. Idempotent. */
-export function softDeletePatient(patientId: string): Patient | null {
-  const db = getDb();
-  const timestamp = nowIso();
-
-  const result = db
-    .prepare(
-      'UPDATE patients SET deleted_at = ?, updated_at = ? WHERE patient_id = ? AND deleted_at IS NULL',
-    )
-    .run(timestamp, timestamp, patientId);
-
-  return result.changes > 0 ? findPatientById(patientId, true) : null;
+export async function softDeletePatient(patientId: string): Promise<Patient | null> {
+  return queryOne<Patient>(
+    `UPDATE patients
+        SET deleted_at = now(), updated_at = now()
+      WHERE patient_id = $1 AND deleted_at IS NULL
+      RETURNING *`,
+    [patientId],
+  );
 }
 
-export function countPatients(): number {
-  const db = getDb();
-  return (db.prepare('SELECT COUNT(*) AS count FROM patients').get() as { count: number }).count;
+export async function countPatients(): Promise<number> {
+  const rows = await query<{ count: string }>('SELECT COUNT(*)::text AS count FROM patients');
+  return Number(rows[0]?.count ?? 0);
 }

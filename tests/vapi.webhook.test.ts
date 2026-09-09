@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app';
+import { closePool } from '../src/db/client';
+import { resetDatabase } from './helpers/db';
 
 /**
  * Integration tests for the voice path.
@@ -19,12 +21,14 @@ let app: FastifyInstance;
 const SECRET = 'test-webhook-secret'; // matches vitest.config.ts
 
 beforeAll(async () => {
+  await resetDatabase();
   app = await buildApp();
   await app.ready();
 });
 
 afterAll(async () => {
   await app.close();
+  await closePool();
 });
 
 /** Post a tool call in the shape Vapi currently sends. */

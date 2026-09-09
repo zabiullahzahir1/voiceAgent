@@ -29,10 +29,24 @@ export function registerErrorHandler(app: FastifyInstance): void {
       return reply.status(400).send(fail('BAD_REQUEST', error.message));
     }
 
-    // A constraint we did not anticipate is a bug, not a client mistake — but
-    // it is still the client's field that broke, so answer 422 rather than 500.
-    if (typeof error.message === 'string' && error.message.includes('SQLITE_CONSTRAINT')) {
-      request.log.error({ err: error, path: request.url }, 'Database constraint violated');
+    /**
+     * Postgres integrity errors that got past Zod. Reaching here means the two
+     * layers disagree, which is a bug worth logging loudly — but the offending
+     * value still came from the client, so the honest answer is 4xx not 500.
+     *
+     * 23505 unique_violation · 23514 check_violation
+     * 23502 not_null_violation · 23503 foreign_key_violation
+     * 22P02 invalid_text_representation (e.g. a malformed UUID)
+     */
+    const pgCode = (error as unknown as { code?: string }).code;
+
+    if (pgCode === '23505') {
+      request.log.warn({ err: error, path: request.url }, 'Unique constraint violated');
+      return reply.status(409).send(fail('CONFLICT', 'That record already exists.'));
+    }
+
+    if (pgCode && ['23514', '23502', '23503', '22P02'].includes(pgCode)) {
+      request.log.error({ err: error, pgCode, path: request.url }, 'Database constraint violated');
       return reply
         .status(422)
         .send(fail('CONSTRAINT_VIOLATION', 'The record violates a database constraint.'));

@@ -1,26 +1,33 @@
 import { buildApp } from './app';
 import { env, warnAboutMissingConfig } from './config/env';
-import { getDb } from './db/client';
+import { closePool, migrate } from './db/client';
 import { logger } from './lib/logger';
 import { seedIfEmpty } from './db/seed';
 
 /**
  * Server entry point.
  *
- * Order matters: open and migrate the database *before* binding the port, so an
- * instance never accepts a phone call it cannot persist. If the database cannot
- * be opened we exit non-zero and let Render restart us, rather than serving
- * traffic in a broken state.
+ * Order matters: connect and migrate *before* binding the port, so an instance
+ * never accepts a phone call it cannot persist. If the database is unreachable
+ * we exit non-zero and let the platform restart us, rather than serving traffic
+ * in a broken state.
  */
 async function main(): Promise<void> {
   try {
-    getDb(); // opens the file, applies the schema
+    await migrate();
   } catch (error) {
-    logger.fatal({ err: error, path: env.databasePath }, 'Could not open the database — exiting');
+    logger.fatal({ err: error }, 'Could not connect to the database — exiting');
     process.exit(1);
   }
 
-  if (env.seedOnBoot) seedIfEmpty();
+  if (env.seedOnBoot) {
+    try {
+      await seedIfEmpty();
+    } catch (error) {
+      // Seeding is a convenience, not a precondition for serving traffic.
+      logger.error({ err: error }, 'Seeding failed — continuing without demo data');
+    }
+  }
 
   warnAboutMissingConfig((message) => logger.warn(message));
 
@@ -41,11 +48,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  /** Drain in-flight requests on redeploy instead of dropping them. */
+  /** Drain in-flight requests and close pooled connections on redeploy. */
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Shutting down');
     try {
       await app.close();
+      await closePool();
       process.exit(0);
     } catch (error) {
       logger.error({ err: error }, 'Error during shutdown');

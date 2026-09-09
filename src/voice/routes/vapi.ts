@@ -172,15 +172,19 @@ export async function registerVapiRoutes(app: FastifyInstance): Promise<void> {
           return reply.status(200).send({ results: [] });
         }
 
-        const results = toolCalls.map((call) => {
-          const result = executeTool(call.name, call.args, { callId });
-          return {
+        // Sequential rather than concurrent: a model can emit `lookup_patient`
+        // and `register_patient` in one batch, and running those in parallel
+        // would race the duplicate check against the insert.
+        const results = [];
+        for (const call of toolCalls) {
+          const result = await executeTool(call.name, call.args, { callId });
+          results.push({
             toolCallId: call.id,
             name: call.name,
             // Vapi feeds `result` back to the model as a string.
             result: JSON.stringify(result),
-          };
-        });
+          });
+        }
 
         // `results` is the current contract; `result` keeps the legacy
         // single-function-call shape working without a second code path.
@@ -191,7 +195,7 @@ export async function registerVapiRoutes(app: FastifyInstance): Promise<void> {
       case 'end-of-call-report': {
         if (callId) {
           try {
-            saveCallLog({
+            await saveCallLog({
               call_id: callId,
               patient_id: null, // already linked at registration time, if any
               caller_number: extractCallerNumber(message),

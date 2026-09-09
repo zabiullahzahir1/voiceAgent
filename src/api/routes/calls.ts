@@ -13,15 +13,18 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
   /** GET /calls — most recent calls, for the dashboard and for debugging. */
   app.get<{ Querystring: { limit?: string } }>('/calls', async (request, reply) => {
     const limit = Math.min(Number.parseInt(request.query.limit ?? '25', 10) || 25, 100);
-    return reply.status(200).send(ok({ calls: listRecentCallLogs(limit) }));
+    return reply.status(200).send(ok({ calls: await listRecentCallLogs(limit) }));
   });
 
   /** GET /patients/:id/calls — the calls that created or updated this record. */
   app.get<{ Params: { id: string } }>('/patients/:id/calls', async (request, reply) => {
     // 404s for an unknown patient rather than returning an empty list.
-    const patient = getPatient(request.params.id);
-    return reply
-      .status(200)
-      .send(ok({ patient_id: patient.patient_id, calls: listCallLogsForPatient(patient.patient_id) }));
+    const patient = await getPatient(request.params.id);
+    return reply.status(200).send(
+      ok({
+        patient_id: patient.patient_id,
+        calls: await listCallLogsForPatient(patient.patient_id),
+      }),
+    );
   });
 }

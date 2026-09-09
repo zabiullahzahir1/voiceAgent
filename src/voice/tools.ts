@@ -165,7 +165,7 @@ export const TOOL_DEFINITIONS = [
 
 type ToolContext = { callId: string | null };
 
-type ToolHandler = (args: Record<string, unknown>, ctx: ToolContext) => ToolResult;
+type ToolHandler = (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
 
 /** Human-readable field labels, so the agent never speaks a snake_case name. */
 const FIELD_LABELS: Record<string, string> = {
@@ -211,7 +211,7 @@ function validationResult(error: ValidationError): ToolResult {
   };
 }
 
-const lookup_patient: ToolHandler = (args) => {
+const lookup_patient: ToolHandler = async (args) => {
   const raw = String(args.phone_number ?? '');
   const phone = normalizePhone(raw);
 
@@ -224,7 +224,7 @@ const lookup_patient: ToolHandler = (args) => {
     };
   }
 
-  const existing = patients.findActiveByPhone(phone);
+  const existing = await patients.findActiveByPhone(phone);
 
   if (!existing) {
     return {
@@ -250,11 +250,11 @@ const lookup_patient: ToolHandler = (args) => {
   };
 };
 
-const register_patient: ToolHandler = (args, ctx) => {
+const register_patient: ToolHandler = async (args, ctx) => {
   try {
-    const patient = patients.createPatient(args);
+    const patient = await patients.createPatient(args);
 
-    if (ctx.callId) linkCallToPatient(ctx.callId, patient.patient_id, 'created');
+    if (ctx.callId) await linkCallToPatient(ctx.callId, patient.patient_id, 'created');
 
     logger.info(
       { event: 'voice.registration.success', call_id: ctx.callId, patient_id: patient.patient_id },
@@ -293,7 +293,7 @@ const register_patient: ToolHandler = (args, ctx) => {
   }
 };
 
-const update_patient: ToolHandler = (args, ctx) => {
+const update_patient: ToolHandler = async (args, ctx) => {
   const { patient_id: patientId, ...fields } = args;
 
   if (typeof patientId !== 'string' || patientId.length === 0) {
@@ -306,9 +306,9 @@ const update_patient: ToolHandler = (args, ctx) => {
   }
 
   try {
-    const patient = patients.updatePatient(patientId, fields);
+    const patient = await patients.updatePatient(patientId, fields);
 
-    if (ctx.callId) linkCallToPatient(ctx.callId, patient.patient_id, 'updated');
+    if (ctx.callId) await linkCallToPatient(ctx.callId, patient.patient_id, 'updated');
 
     logger.info(
       { event: 'voice.update.success', call_id: ctx.callId, patient_id: patient.patient_id },
@@ -346,11 +346,11 @@ const update_patient: ToolHandler = (args, ctx) => {
   }
 };
 
-const schedule_appointment: ToolHandler = (args, ctx) => {
+const schedule_appointment: ToolHandler = async (args, ctx) => {
   const patientId = String(args.patient_id ?? '');
 
   try {
-    const appointment = scheduleAppointment({
+    const appointment = await scheduleAppointment({
       patientId,
       timePreference: args.time_preference ? String(args.time_preference) : undefined,
       reason: args.reason ? String(args.reason) : undefined,
@@ -413,11 +413,11 @@ const HANDLERS: Record<string, ToolHandler> = {
  * leave the caller listening to silence, so every path returns a spoken
  * recovery instruction instead.
  */
-export function executeTool(
+export async function executeTool(
   name: string,
   args: Record<string, unknown>,
   ctx: ToolContext,
-): ToolResult {
+): Promise<ToolResult> {
   const handler = HANDLERS[name];
 
   if (!handler) {
@@ -436,7 +436,7 @@ export function executeTool(
   );
 
   try {
-    return handler(args, ctx);
+    return await handler(args, ctx);
   } catch (error) {
     return systemFailureResult(error, ctx, name);
   }

@@ -1,26 +1,28 @@
-import { getDb } from './client';
+import { closePool, migrate, query } from './client';
 import { logger } from '../lib/logger';
-import { env } from '../config/env';
 
 /**
  * Standalone migration entry point (`npm run migrate`).
  *
- * The schema is idempotent (`CREATE TABLE IF NOT EXISTS` throughout) and is
- * also applied automatically when the server opens the database, so this script
- * exists mainly to create or inspect the file without booting the API — useful
- * in a Docker build step or when debugging a mounted disk.
+ * The schema is idempotent DDL and is also applied automatically when the
+ * server boots, so this script exists mainly to prepare or inspect a database
+ * without starting the API — useful when pointing at a fresh Neon/Render
+ * instance for the first time.
  */
-function main(): void {
-  const db = getDb();
+async function main(): Promise<void> {
+  await migrate();
 
-  const tables = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-    .all() as { name: string }[];
-
-  logger.info(
-    { database: env.databasePath, tables: tables.map((t) => t.name) },
-    'Schema applied',
+  const tables = await query<{ table_name: string }>(
+    `SELECT table_name FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'
+      ORDER BY table_name`,
   );
+
+  logger.info({ tables: tables.map((t) => t.table_name) }, 'Schema applied');
+  await closePool();
 }
 
-main();
+main().catch((error: unknown) => {
+  logger.fatal({ err: error }, 'Migration failed');
+  process.exit(1);
+});

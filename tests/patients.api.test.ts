@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app';
+import { closePool } from '../src/db/client';
+import { resetDatabase } from './helpers/db';
 
 /**
  * Integration tests for the REST layer.
@@ -25,12 +27,14 @@ const VALID_PATIENT = {
 };
 
 beforeAll(async () => {
+  await resetDatabase();
   app = await buildApp();
   await app.ready();
 });
 
 afterAll(async () => {
   await app.close();
+  await closePool();
 });
 
 /** Create a patient with a unique phone number so tests stay independent. */

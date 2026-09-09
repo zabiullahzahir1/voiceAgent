@@ -63,11 +63,15 @@ exposes the records over a REST API.
 │  src/api/      REST routes ──────────────┼──→  reviewers, dashboard, curl
 │       │                                  │
 │       ▼                                  │
-│  src/db/       SQLite (better-sqlite3)   │
+│  src/db/       pg connection pool        │
 └───────────────┬──────────────────────────┘
                 ▼
-         /data/patients.sqlite   (Render persistent disk)
+          PostgreSQL (Neon / Supabase / Render)
 ```
+
+The service holds **no local state** — every record lives in Postgres. The
+container can restart, redeploy or scale to several instances without losing a
+registration, which is what satisfies "Jane Doe must still be there on Call 2".
 
 **The important structural decision:** the voice agent and the REST API share one
 service layer (`src/domain/patient.service.ts`). A tool call from a phone call
@@ -100,8 +104,17 @@ Swapping Vapi for Retell or a Twilio media-stream bridge means rewriting
 | Transcription | **Deepgram nova-3**, `numerals: true` | Spoken digits are transcribed as digits, which materially improves phone-number and ZIP capture. `language: multi` enables the Spanish-switch path. |
 | Backend | **Node + TypeScript + Fastify** | One language across API, webhook and dashboard. Fastify's `inject()` makes the whole HTTP surface testable with no running server. |
 | Validation | **Zod** | One schema serves the API and the voice tools, and its error output maps cleanly onto per-field spoken re-prompts. |
-| Database | **SQLite** (`better-sqlite3`) | Single writer, tiny dataset, zero operational surface. The assessment names "SQLite over Postgres" as a sensible shortcut. Synchronous driver means no connection pooling and no async edge cases in the hot path of a live call. |
-| Hosting | **Render** (Docker + persistent disk) | Deploys from a Dockerfile, and a mounted disk gives real persistence across restarts and redeploys. |
+| Database | **PostgreSQL** (`pg`) | Real `DATE`/`TIMESTAMPTZ` types, partial unique indexes and `ON CONFLICT` — so duplicate detection and the not-in-the-future DOB rule are enforced by the storage layer, not just by application code. A managed free tier persists across restarts with no disk to pay for or lose. |
+| Hosting | **Render** (Docker, free plan) | Deploys from a Dockerfile. Because state lives in Postgres, the service is stateless and needs no persistent disk. |
+
+> **Why not SQLite?** It was the first implementation, and it is the shortcut the
+> assessment explicitly blesses. It was replaced because the only way to persist
+> a SQLite file on Render is a paid disk — the free plan has an ephemeral
+> filesystem, so patient records would vanish between the reviewer's two calls
+> and fail the core requirement. Postgres was the cheaper trade: a free
+> non-expiring tier, a stateless container, better column types, and no
+> single-writer limit. The swap touched only `src/db/` and the repository
+> layer, which is the payoff from keeping SQL out of the service layer.
 
 ---
 
@@ -114,8 +127,8 @@ src/
     errors.ts                   AppError hierarchy (422/404/409/400/401)
     logger.ts                   pino, with secret redaction
   db/
-    schema.ts                   DDL: tables, CHECK constraints, indexes
-    client.ts                   Connection + PRAGMAs + migration on open
+    schema.ts                   DDL: tables, CHECK constraints, partial indexes
+    client.ts                   Pool, type parsers, transactions, migration
     seed.ts                     Two demo patients, inserted only if empty
     migrate.ts                  Standalone `npm run migrate`
   domain/
@@ -144,18 +157,23 @@ tests/                          59 tests: unit + API + voice webhook
 
 ## Running it locally
 
-Requires Node 20+ (developed on Node 24).
+Requires Node 20+ (developed on Node 24) and a Postgres to point at.
 
 ```bash
 git clone https://github.com/zabiullahzahir1/voiceAgent.git
 cd voiceAgent
 npm install
 cp .env.example .env      # Windows: copy .env.example .env
+
+npm run db:up             # local Postgres in Docker on port 55432
 npm run dev
 ```
 
-The server starts on `http://localhost:3000`, creates `./data/patients.sqlite`,
-applies the schema and seeds two demo patients.
+`db:up` starts `postgres:16-alpine` matching the default `DATABASE_URL` in
+`.env.example`. To use a hosted database instead, skip it and put your Neon or
+Supabase connection string in `DATABASE_URL`.
+
+On boot the server applies the schema and seeds two demo patients.
 
 Verify:
 
@@ -164,12 +182,8 @@ curl http://localhost:3000/health
 curl "http://localhost:3000/patients?last_name=doe"
 ```
 
-Open `http://localhost:3000/` for the dashboard.
-
-> **npm 11 note:** npm 11 blocks native install scripts by default. If
-> `better-sqlite3` fails to load, run `npm approve-scripts better-sqlite3`.
-> The repo's `package.json` already records the approval, so a fresh
-> `npm install` should be fine.
+Open `http://localhost:3000/` for the dashboard. Tear the database down with
+`npm run db:down`.
 
 ### Connecting a phone number
 
@@ -206,30 +220,42 @@ You can inspect exactly what it will send at `GET /voice/assistant-config`.
 
 ## Deploying
 
-### Render (recommended)
+### 1. Create a database
+
+[Neon](https://neon.tech) — free tier, does not expire. Create a project and
+copy the **pooled** connection string (it ends in `?sslmode=require`).
+
+Supabase works identically. Render's own free Postgres also works but is deleted
+after 30 days; `render.yaml` has a commented block for it.
+
+### 2. Deploy the service
 
 1. Push this repo to GitHub.
 2. Render dashboard → **New → Blueprint** → select the repo. `render.yaml` is
    picked up automatically.
-3. Set the secret env vars in the Render dashboard: `VAPI_SERVER_SECRET`,
-   `VAPI_API_KEY`, and optionally `API_TOKEN`.
-4. Deploy, then run `npm run provision:vapi` locally with
-   `PUBLIC_BASE_URL=https://<your-service>.onrender.com` so Vapi points at the
-   deployed webhook.
+3. Set the secret env vars in the Render dashboard:
+   - `DATABASE_URL` — the connection string from step 1
+   - `VAPI_SERVER_SECRET` — any random string
+   - `VAPI_API_KEY`, `API_TOKEN` — optional
+4. Deploy. The schema is applied automatically on first boot.
+5. Point Vapi at the deployment:
+   ```bash
+   PUBLIC_BASE_URL=https://<your-service>.onrender.com npm run provision:vapi
+   ```
 
-> **⚠ Plan requirement.** Render's **free** plan has no persistent disk and
-> spins the service down when idle, so the SQLite file would be lost between
-> calls — failing the "data survives restarts" requirement. `render.yaml`
-> therefore specifies the **starter** plan (~$7/mo) with a 1 GB disk mounted at
-> `/data`. See [trade-offs](#known-limitations-and-trade-offs) for free
-> alternatives.
+> **Free-plan caveat:** the Render web service sleeps after ~15 minutes idle and
+> takes 30–60 s to wake, so the *first* call after a quiet period may time out.
+> Hit `/health` once before demoing, or move to the starter plan to keep it
+> warm. Patient data is unaffected either way — it lives in Postgres.
 
 ### Docker
+
+The container is stateless; all it needs is a `DATABASE_URL`.
 
 ```bash
 docker build -t voice-patient-registration .
 docker run -p 3000:3000 \
-  -v "$(pwd)/data:/data" \
+  -e DATABASE_URL='postgresql://user:pass@host/patients?sslmode=require' \
   -e PUBLIC_BASE_URL=https://your-public-url \
   -e VAPI_SERVER_SECRET=your-secret \
   voice-patient-registration
@@ -247,7 +273,8 @@ No secret is ever hardcoded; everything is read through `src/config/env.ts`.
 | `NODE_ENV` | no | `development` | `production` disables pretty logs; `test` uses an in-memory DB |
 | `LOG_LEVEL` | no | `info` | pino level |
 | `PUBLIC_BASE_URL` | **yes (deployed)** | `http://localhost:PORT` | Public URL Vapi calls back into |
-| `DATABASE_PATH` | no | `./data/patients.sqlite` | SQLite file; `/data/patients.sqlite` in Docker |
+| `DATABASE_URL` | **yes** | — | Postgres connection string |
+| `DATABASE_SSL` | no | auto | TLS to the database. Auto-detected: on for managed hosts, off for localhost |
 | `SEED_ON_BOOT` | no | `true` | Insert demo patients when the table is empty |
 | `VAPI_API_KEY` | for provisioning | — | Vapi **private** key. Used only by `npm run provision:vapi`; the server never reads it |
 | `VAPI_SERVER_SECRET` | **yes (deployed)** | — | Shared secret verified on every webhook request |
@@ -324,8 +351,14 @@ All 19 specified fields, plus `deleted_at` for soft deletes.
 
 Storage decisions:
 
-- **Dates** as `YYYY-MM-DD`, **timestamps** as ISO-8601 UTC. SQLite has no date
-  type; these formats sort lexicographically in chronological order.
+- **Real column types.** `date_of_birth` is a `DATE` and the audit columns are
+  `TIMESTAMPTZ`, so the database itself rejects `2001-02-30` and stores instants
+  unambiguously in UTC. A `CHECK (date_of_birth <= CURRENT_DATE)` enforces the
+  not-in-the-future rule at the storage layer rather than trusting the agent.
+- **Custom `pg` type parsers** (`src/db/client.ts`) keep `DATE` as
+  `YYYY-MM-DD` and `TIMESTAMPTZ` as an ISO string, instead of node-postgres's
+  default `Date` objects. Without this a patient born on `1985-03-05` can come
+  back as `1985-03-04` depending on the server's timezone.
 - **Phone numbers** as exactly 10 normalised digits. `(415) 555-0123`,
   `415-555-0123` and `+1 415 555 0123` all collapse to `4155550123`, which is
   what makes returning-caller lookup reliable. Formatting is applied on output
@@ -335,7 +368,10 @@ Storage decisions:
   produces friendly errors; the schema guarantees the invariant.
 - **Partial unique index** on `phone_number WHERE deleted_at IS NULL` — one
   active patient per number. This enforces duplicate detection at the storage
-  layer and lets a number be reused after a soft delete.
+  layer and lets a number be reused after a soft delete. The service does a
+  pre-check for a friendly message, then catches SQLSTATE `23505` as a backstop,
+  so two simultaneous registrations of the same number cannot both succeed. The
+  same pattern prevents double-booked appointment slots.
 
 Two extra tables support bonus features: `call_logs` (transcript + summary per
 call, linked to the patient) and `appointments` (mock scheduling).
@@ -433,11 +469,15 @@ because an unhandled exception during a call means dead air.
 ## Tests
 
 ```bash
+npm run db:up    # if you do not already have Postgres running
 npm test
 ```
 
-59 tests across three files, all against real code paths — no mocks, an
-in-memory SQLite database, and Fastify's `inject()` rather than a live port.
+59 tests across three files, all against real code paths — no mocks and no
+database emulator. They run against a real Postgres (so CHECK constraints,
+partial unique indexes and `ON CONFLICT` are genuinely exercised) via Fastify's
+`inject()` rather than a live port. Point `TEST_DATABASE_URL` elsewhere to use a
+different instance.
 
 - `tests/normalize.test.ts` — the speech-to-data layer: phone formats, NANP
   rules, future/impossible dates, spoken state names, dictated emails.
@@ -455,25 +495,26 @@ Also available: `npm run typecheck`.
 
 **Deployment**
 
-- **Render's free plan cannot persist SQLite.** No disk, and the instance spins
-  down when idle. `render.yaml` uses the starter plan (~$7/mo) with a mounted
-  disk. Free alternatives, in order of effort: point `DATABASE_PATH` at a
-  [Turso](https://turso.tech) libSQL database (SQLite-compatible, generous free
-  tier, needs a driver swap); use Render's free Postgres (expires after 30 days,
-  needs a repository rewrite); or accept ephemeral storage, which fails the
-  persistence requirement.
+- **The free Render instance sleeps after ~15 minutes idle.** The first call
+  after a quiet period can take 30–60 s to wake and may time out. Mitigation:
+  hit `/health` before a demo, use an uptime pinger, or move to the starter
+  plan. Data is never at risk — it lives in Postgres, not on the instance.
+- **Neon's free tier also scales compute to zero**, adding a few hundred
+  milliseconds to the first query after idling. The pool is configured with a
+  10-second connection timeout to absorb that.
+- **No connection retry with backoff.** A database blip during a call surfaces
+  as the tool's "system failure" path, which is graceful but gives up after one
+  retry.
 
 **Architecture**
 
-- **SQLite means one writer.** Fine for a single instance; horizontal scaling
-  would need Postgres. The repository layer is the only thing that would change.
+- **No migration framework.** The schema is idempotent DDL applied on boot,
+  which is fine greenfield but cannot express a column rename or a backfill.
+  Drizzle or node-pg-migrate would be the next step.
 - **The voice tools call the service layer in-process, not over HTTP.** The
   assessment permits either. In-process avoids a network hop during a live call
   and cannot partially fail; the cost is that the agent could not be moved to a
   separate host without introducing an HTTP client.
-- **No migration framework.** The schema is idempotent DDL applied on open,
-  which is sufficient for a greenfield service but would need something like
-  Drizzle or Knex once columns start changing in production.
 
 **Security**
 
@@ -504,8 +545,8 @@ Also available: `npm run typecheck`.
 
 Given more time, in priority order:
 
-1. **Postgres + Drizzle** — removes the single-writer limit and the Render disk
-   requirement in one change.
+1. **A real migration tool** (Drizzle or node-pg-migrate) so schema changes are
+   versioned and reversible rather than idempotent DDL applied on boot.
 2. **Resume an interrupted call.** Persist partial intake state keyed by caller
    ID so a dropped call resumes where it left off rather than restarting.
 3. **Eval harness for the prompt.** Scripted caller transcripts replayed against
