@@ -230,18 +230,35 @@ after 30 days; `render.yaml` has a commented block for it.
 
 ### 2. Deploy the service
 
-1. Push this repo to GitHub.
-2. Render dashboard → **New → Blueprint** → select the repo. `render.yaml` is
-   picked up automatically.
-3. Set the secret env vars in the Render dashboard:
-   - `DATABASE_URL` — the connection string from step 1
-   - `VAPI_SERVER_SECRET` — any random string
-   - `VAPI_API_KEY`, `API_TOKEN` — optional
-4. Deploy. The schema is applied automatically on first boot.
-5. Point Vapi at the deployment:
-   ```bash
-   PUBLIC_BASE_URL=https://<your-service>.onrender.com npm run provision:vapi
-   ```
+Render requires a payment method to use Blueprints, so there are two paths.
+
+**Free — create the service manually (no card):**
+
+1. Render dashboard → **New → Web Service** → connect this GitHub repo
+2. Settings: **Language `Docker`**, branch `main`, instance type **Free**
+3. Add environment variables:
+
+   | Key | Value |
+   |---|---|
+   | `DATABASE_URL` | the connection string from step 1 |
+   | `VAPI_SERVER_SECRET` | any random string |
+   | `NODE_ENV` | `production` |
+   | `SEED_ON_BOOT` | `true` |
+
+   `PUBLIC_BASE_URL` is not needed — the app falls back to
+   `RENDER_EXTERNAL_URL`, which Render injects automatically.
+4. Set **Health Check Path** to `/health`, then create the service.
+
+**With a payment method — Blueprint:** Render dashboard → **New → Blueprint** →
+select the repo. `render.yaml` is applied automatically; it prompts for the same
+secrets.
+
+Either way the schema is applied on first boot. Then point Vapi at the
+deployment:
+
+```bash
+PUBLIC_BASE_URL=https://<your-service>.onrender.com npm run provision:vapi
+```
 
 > **Free-plan caveat:** the Render web service sleeps after ~15 minutes idle and
 > takes 30–60 s to wake, so the *first* call after a quiet period may time out.

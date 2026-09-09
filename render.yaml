@@ -2,6 +2,12 @@
 #
 # Deploy with: Render dashboard -> New -> Blueprint -> point at this repo.
 #
+# NOTE: Render now requires a payment method to use Blueprints. To deploy on the
+# free plan without one, create the service by hand instead (New -> Web Service,
+# runtime Docker) and set the env vars below manually. PUBLIC_BASE_URL can be
+# omitted in that case — the app falls back to RENDER_EXTERNAL_URL, which Render
+# injects automatically. See "Deploying" in the README.
+#
 # The service is stateless: all patient data lives in Postgres, reached via
 # DATABASE_URL. That means the free plan is sufficient — there is no disk to
 # lose when the instance restarts or spins down, which is what makes the

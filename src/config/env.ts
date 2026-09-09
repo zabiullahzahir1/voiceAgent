@@ -36,7 +36,18 @@ export const env = {
   port: int('PORT', 3000),
   host: str('HOST', '0.0.0.0'),
   logLevel: str('LOG_LEVEL', 'info'),
-  publicBaseUrl: str('PUBLIC_BASE_URL', `http://localhost:${int('PORT', 3000)}`).replace(/\/+$/, ''),
+  /**
+   * Public URL Vapi calls back into.
+   *
+   * Falls back to `RENDER_EXTERNAL_URL`, which Render injects automatically —
+   * so a manually created Render service works without anyone having to paste
+   * the service's own URL back into its own environment. Explicit
+   * `PUBLIC_BASE_URL` still wins, which is what local tunnels need.
+   */
+  publicBaseUrl: str(
+    'PUBLIC_BASE_URL',
+    str('RENDER_EXTERNAL_URL', `http://localhost:${int('PORT', 3000)}`),
+  ).replace(/\/+$/, ''),
 
   /** Postgres connection string, e.g. postgresql://user:pass@host/db. */
   databaseUrl: str('DATABASE_URL'),
