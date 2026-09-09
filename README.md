@@ -8,14 +8,26 @@ exposes the records over a REST API.
 >
 > | | |
 > |---|---|
-> | **Phone number** | `TBD — fill in after running npm run provision:vapi` |
-> | **API base URL** | `TBD — fill in after deploying to Render` |
-> | **Dashboard** | `<API base URL>/` |
-> | **Health check** | `<API base URL>/health` |
+> | **📞 Phone number** | **+1 (681) 465-7159** |
+> | **API base URL** | https://voice-agent-bice-nine.vercel.app |
+> | **Dashboard** | https://voice-agent-bice-nine.vercel.app/ |
+> | **Health check** | https://voice-agent-bice-nine.vercel.app/health |
 >
-> Try it: call the number and register. Then run
-> `curl "<API base URL>/patients?last_name=<your last name>"` and the record is there.
-> Call again with the same phone number and the agent will recognise you.
+> No credentials are needed to read the API.
+>
+> **Try it:** call the number and register as a new patient. Then:
+>
+> ```bash
+> curl "https://voice-agent-bice-nine.vercel.app/patients?last_name=<your last name>"
+> ```
+>
+> The record is there, and it survives restarts — the database is managed
+> Postgres, not local disk. Call back with the same phone number and the agent
+> recognises you and offers to update instead of creating a duplicate.
+>
+> **Two seeded demo patients** are already present. Giving the agent
+> **415 555 0142** on a call demonstrates returning-caller detection without
+> having to register first.
 
 ---
 
