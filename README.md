@@ -105,7 +105,7 @@ Swapping Vapi for Retell or a Twilio media-stream bridge means rewriting
 | Backend | **Node + TypeScript + Fastify** | One language across API, webhook and dashboard. Fastify's `inject()` makes the whole HTTP surface testable with no running server. |
 | Validation | **Zod** | One schema serves the API and the voice tools, and its error output maps cleanly onto per-field spoken re-prompts. |
 | Database | **PostgreSQL** (`pg`) | Real `DATE`/`TIMESTAMPTZ` types, partial unique indexes and `ON CONFLICT` — so duplicate detection and the not-in-the-future DOB rule are enforced by the storage layer, not just by application code. A managed free tier persists across restarts with no disk to pay for or lose. |
-| Hosting | **Render** (Docker, free plan) | Deploys from a Dockerfile. Because state lives in Postgres, the service is stateless and needs no persistent disk. |
+| Hosting | **Vercel** (serverless) | Render, Fly and Railway all now require a payment method even on free tiers. Vercel does not, and it is on the assessment's own hosting list. Because state lives in Postgres, running on ephemeral instances costs nothing. A Dockerfile and `render.yaml` are also included for a container deploy. |
 
 > **Why not SQLite?** It was the first implementation, and it is the shortcut the
 > assessment explicitly blesses. It was replaced because the only way to persist
@@ -138,7 +138,7 @@ src/
     patient.service.ts          Business logic — shared by API and voice
     call-log.repository.ts      Transcript storage
     appointment.service.ts      Mock scheduling
-  api/
+  api/                          (HTTP layer — not to be confused with /api below)
     envelope.ts                 { data, error }
     error-handler.ts            Error → HTTP status mapping
     auth.ts                     Optional bearer token on writes
@@ -149,8 +149,10 @@ src/
     assistant.ts                Full Vapi assistant config, generated from source
     routes/vapi.ts              Webhook: auth, payload parsing, dispatch
   scripts/provision-vapi.ts     Idempotently push the assistant to Vapi
+api/index.ts                    Vercel serverless entry — wraps the same app
 public/index.html               Dashboard (dependency-free)
 tests/                          59 tests: unit + API + voice webhook
+Dockerfile, render.yaml         Container deploy (alternative to Vercel)
 ```
 
 ---
@@ -228,36 +230,52 @@ copy the **pooled** connection string (it ends in `?sslmode=require`).
 Supabase works identically. Render's own free Postgres also works but is deleted
 after 30 days; `render.yaml` has a commented block for it.
 
-### 2. Deploy the service
-
-Render requires a payment method to use Blueprints, so there are two paths.
-
-**Free — create the service manually (no card):**
-
-1. Render dashboard → **New → Web Service** → connect this GitHub repo
-2. Settings: **Language `Docker`**, branch `main`, instance type **Free**
-3. Add environment variables:
-
-   | Key | Value |
-   |---|---|
-   | `DATABASE_URL` | the connection string from step 1 |
-   | `VAPI_SERVER_SECRET` | any random string |
-   | `NODE_ENV` | `production` |
-   | `SEED_ON_BOOT` | `true` |
-
-   `PUBLIC_BASE_URL` is not needed — the app falls back to
-   `RENDER_EXTERNAL_URL`, which Render injects automatically.
-4. Set **Health Check Path** to `/health`, then create the service.
-
-**With a payment method — Blueprint:** Render dashboard → **New → Blueprint** →
-select the repo. `render.yaml` is applied automatically; it prompts for the same
-secrets.
-
-Either way the schema is applied on first boot. Then point Vapi at the
-deployment:
+### 2. Deploy the service (Vercel — no payment method required)
 
 ```bash
-PUBLIC_BASE_URL=https://<your-service>.onrender.com npm run provision:vapi
+npx vercel login
+npx vercel --prod
+```
+
+Accept the defaults; there is no framework preset to choose. Then set the
+environment variables, either in the Vercel dashboard under
+**Settings → Environment Variables** or from the CLI:
+
+| Key | Value |
+|---|---|
+| `DATABASE_URL` | the connection string from step 1 |
+| `VAPI_SERVER_SECRET` | any random string |
+| `SEED_ON_BOOT` | `true` |
+
+`PUBLIC_BASE_URL` is optional — set it to the deployment URL if you want the
+logged webhook address to be exact. `NODE_ENV` is set by Vercel automatically.
+
+Redeploy after adding variables (`npx vercel --prod`), since they are injected
+at build time.
+
+`api/index.ts` is the entry point: it builds the same Fastify app that
+`src/index.ts` runs locally and hands it each request, so there is no separate
+serverless codebase to maintain. `vercel.json` rewrites every path to that
+function, except static assets which Vercel serves from `public/` directly.
+
+<details>
+<summary>Alternative: Render / any Docker host</summary>
+
+Render requires a card even on the free plan, but the container path is fully
+supported if you have one:
+
+- **Blueprint:** Render dashboard → **New → Blueprint** → select the repo;
+  `render.yaml` is applied automatically.
+- **Manual:** **New → Web Service**, Language `Docker`, instance type Free, and
+  set the same env vars by hand. `PUBLIC_BASE_URL` can be omitted — the app
+  falls back to `RENDER_EXTERNAL_URL`, which Render injects.
+
+</details>
+
+Then point Vapi at whichever deployment you used:
+
+```bash
+PUBLIC_BASE_URL=https://<your-deployment-url> npm run provision:vapi
 ```
 
 > **Free-plan caveat:** the Render web service sleeps after ~15 minutes idle and
@@ -512,10 +530,16 @@ Also available: `npm run typecheck`.
 
 **Deployment**
 
-- **The free Render instance sleeps after ~15 minutes idle.** The first call
-  after a quiet period can take 30–60 s to wake and may time out. Mitigation:
-  hit `/health` before a demo, use an uptime pinger, or move to the starter
-  plan. Data is never at risk — it lives in Postgres, not on the instance.
+- **Every free container host now wants a card.** Render (including its free
+  plan and Blueprints), Fly.io and Railway all require payment details. Vercel
+  does not, which is why the primary deployment is serverless. The Dockerfile
+  and `render.yaml` remain in the repo and work unchanged if you have a card.
+- **Serverless cold starts.** A first request to a fresh instance pays for
+  building the Fastify app and connecting to Postgres — roughly 1–2 s. The app
+  is memoised per instance, so warm requests are ~20 ms. During a live call the
+  agent has usually already triggered `lookup_patient` before the first write,
+  so the instance is warm by the time it matters. Setting `MIGRATE_ON_BOOT=false`
+  after the first deploy trims it further.
 - **Neon's free tier also scales compute to zero**, adding a few hundred
   milliseconds to the first query after idling. The pool is configured with a
   10-second connection timeout to absorb that.

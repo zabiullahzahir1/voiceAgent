@@ -1,0 +1,11 @@
+{
+  // Typecheck-only config that also covers the deployment adapters and tests,
+  // which sit outside `src/` and so are excluded from the build in
+  // `tsconfig.json` (that one has rootDir: "src" to keep dist/ flat).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "api/**/*.ts", "tests/**/*.ts", "vitest.config.ts"]
+}

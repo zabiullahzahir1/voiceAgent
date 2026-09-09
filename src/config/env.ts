@@ -69,6 +69,14 @@ export const env = {
   })(),
 
   seedOnBoot: bool('SEED_ON_BOOT', true),
+  /**
+   * Apply the schema at startup.
+   *
+   * On a long-lived server this is free — it happens once. On serverless it
+   * runs again on every cold start, so it can be turned off there once the
+   * schema exists (`npm run migrate` applies it out of band).
+   */
+  migrateOnBoot: bool('MIGRATE_ON_BOOT', true),
 
   vapi: {
     apiKey: str('VAPI_API_KEY'),
